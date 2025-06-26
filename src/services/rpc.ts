@@ -83,18 +83,18 @@ async function subscribe () {
 		if (room != key.room) continue;		
 		if (streamKey == stream.streamKey) continue;		
 		
-		if (pcS[stream.streamKey] && detectSilence(pcS[stream.streamKey].analyser)) {
-			console.debug('stale', pcS[stream.streamKey])			
-			
-			if (onDisconnect) {
-			  onDisconnect(key.id)
-			  pcS[stream.streamKey].pc.close()
-			  delete pcS[stream.streamKey]
-			  continue;
-			}			
+		const activeStream = pcS[stream.streamKey];
+		const stale = activeStream && detectSilence(activeStream.analyser);
+		
+		if (stale) 	{
+		  console.debug('stale check', stale)						
+		  onDisconnect(key.id)
+		  activeStream.pc.close()
+		  delete pcS[stream.streamKey]
+		  continue;			
 		}
 		
-		if (pcS[stream.streamKey]) continue;
+		if (activeStream) continue;
 
 		pcS[stream.streamKey] = {pc: new RTCPeerConnection(), key, id: stream.streamKey};
 	
@@ -118,6 +118,12 @@ async function subscribe () {
 			  if (onConnect) {
 				onConnect(pc, ms, analyser, key.id, key.id, key.name)
 				pcS[stream.streamKey].analyser = analyser;
+				
+				ms.getTracks().forEach((track) => {  
+					if (track.kind === 'audio') {
+						pcS[stream.streamKey].track = track;	
+					}	  
+				})							
 			  }
 		  }
 		}		
