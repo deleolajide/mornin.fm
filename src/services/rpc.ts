@@ -2,187 +2,149 @@ import { API_BASE } from '@/constants'
 import { uuidv4 } from '@/utils/uuid'
 import Base64 from '@/utils/base64'
 
+/*
+[{"streamKey":"b45b5cc2-21f9-4c99-94c2-3e0ceef2505a","firstSeenEpoch":1750868475,"audioPacketsReceived":0,"videoStreams":[],"whepSessions":[]}]
+*/
 const constraints = {
   audio: true,
   video: false
 }
 
-const defaultIceServer = {
-  urls: 'turn:35.235.85.40:443',
-  username: 'webrtc',
-  credential: 'turnpassword'
-}
-
-const configuration:any = {
-  iceServers: [],
-  iceTransportPolicy: 'relay',
-  bundlePolicy: 'max-bundle',
-  rtcpMuxPolicy: 'require',
-  sdpSemantics: 'unified-plan'
-}
-
 const _AudioContext:any = (window as any).AudioContext || (window as any).webkitAudioContext
 const audioCtx = new _AudioContext()
-let ucid = ''
+const pcS = {}
+
 let uid = ''
 let nickname = ''
-let rnameRPC = ''
-let unameRPC = ''
-let onConnect = (pc:any, stream:any, analyser:any, trackId:string, uid:string, nickname:string) => {}
-let onDisconnect = (trackId:string) => {}
+let room = ''
+let streamKey = ''
+
+let onConnect = (pc:any, stream:any, analyser:any, streamId:string, uid:string, nickname:string) => {}
+let onDisconnect = (streamId:string) => {}
 let onError = (err:any) => {}
 let onResume = (err:any) => {}
 
-let pc:any = null
+let pcP:any = null
 let running:boolean = false
 
-export function launch (room, _nickname, _uid, _onConnect, _onDisconnect, _onResume, _onError) {
-  const uname = _uid + ':' + Base64.encode(_nickname)
-  rnameRPC = encodeURIComponent(room)
-  unameRPC = encodeURIComponent(uname)
-  uid = _uid
+export function launch (_room, _nickname, _uid, _onConnect, _onDisconnect, _onResume, _onError) {
+  room = _room;
+  streamKey = btoa(JSON.stringify({room, id: _uid, name: _nickname}));  
+  
   onConnect = _onConnect
   onDisconnect = _onDisconnect
   onResume = _onResume
   onError = _onError
+  
   nickname = _nickname
+  uid = _uid
+ 
+  window.addEventListener("beforeunload", () => { stop()});
+  window.addEventListener("unload", () => { stop()});
+  
   running = true
   start()
 }
 
 export function stop () {
-  if (pc) {
-    pc.close()
-  }
+  if (pcP) {pcP.close()}
+  for (let key of Object.getOwnPropertyNames(pcS)) {pcS[key].pc.close()}
+  
   running = false
-  console.log('stop: ' + running)
+  console.debug('stop: ' + running)
 }
 
-async function rpc (method, params) {
-  const rpcUrl = API_BASE
-  try {
-    const response = await fetch(rpcUrl, {
-      method: 'POST', // *GET, POST, PUT, DELETE, etc.
-      mode: 'cors', // no-cors, *cors, same-origin
-      cache: 'no-cache', // *default, no-cache, reload, force-cache, only-if-cached
-      credentials: 'omit', // include, *same-origin, omit
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      redirect: 'follow', // manual, *follow, error
-      referrerPolicy: 'no-referrer', // no-referrer, *client
-      body: JSON.stringify({ id: uuidv4(), method, params }) // body data type must match "Content-Type" header
-    })
-    return response.json() // parses JSON response into native JavaScript objects
-  } catch (err) {
-    console.log('fetch error', method, params, err)
-    return await rpc(method, params)
-  } finally {
-  }
+function detectSilence(analyser) {
+   if (!analyser) return true;
+   
+   const bufferLength = analyser.frequencyBinCount;
+   const dataArray = new Float32Array(bufferLength);
+   analyser.getFloatFrequencyData(dataArray);	
+   let isSilence = true;
+   
+   for (let i = 0; i < bufferLength; i++) {
+	   if (dataArray[i] > -100) {
+		   isSilence = false;
+		   break;
+	   }
+   }
+   return isSilence;
 }
 
-async function subscribe (pc:any) {
-  const res = await rpc('subscribe', [rnameRPC, unameRPC, ucid])
-  // console.log('subscribe', res)
-  if (res.hasOwnProperty('error')) {
-    console.log('try to reconnect', res.error.description)
-    if (onResume) {
-      const prom:any = onResume(res.error)
-      prom.then(() => {
-        if (running) {
-          console.log('reconnect in 0.5s')
-          setTimeout(async () => {
-            pc.close()
-            await start()
-          }, 500)
-        }
-      })
-    }
-    return
-  }
-  if (res.data && res.data.type === 'offer') {
-    console.log('subscribe offer', res.data)
-    await pc.setRemoteDescription(res.data)
-    const sdp = await pc.createAnswer()
-    await pc.setLocalDescription(sdp)
-    await rpc('answer', [rnameRPC, unameRPC, ucid, JSON.stringify(sdp)])
-  }
-  setTimeout(function () {
-    subscribe(pc)
-  }, 3000)
+async function subscribe () {	
+    const statusURL = "https://pade.chat:5443/orinayo/api/status";	  	  
+	const resp = await fetch(statusURL);
+	const streams = await resp.json();
+
+    for (let stream of streams) {
+		//console.debug("scanning stream", stream, pcS[stream.streamKey]);
+		const key = JSON.parse(atob(stream.streamKey));
+		
+		if (room != key.room) continue;		
+		if (streamKey == stream.streamKey) continue;		
+		
+		if (pcS[stream.streamKey] && detectSilence(pcS[stream.streamKey].analyser)) {
+			console.debug('stale', pcS[stream.streamKey])			
+			
+			if (onDisconnect) {
+			  onDisconnect(key.id)
+			  pcS[stream.streamKey].pc.close()
+			  delete pcS[stream.streamKey]
+			  continue;
+			}			
+		}
+		
+		if (pcS[stream.streamKey]) continue;
+
+		pcS[stream.streamKey] = {pc: new RTCPeerConnection(), key, id: stream.streamKey};
+	
+		pcS[stream.streamKey].pc.ontrack = (event) => {
+		  const key = pcS[stream.streamKey].key;
+		  const pc = pcS[stream.streamKey].pc;
+		  
+		  console.debug('ontrack', event, key, pc);
+
+		  for (let ms of event.streams) {
+			  if (!ms) continue;
+			  
+			  const analyser = audioCtx.createAnalyser();
+			  analyser.fftSize = 256;
+			  analyser.minDecibels = -80;
+			  analyser.maxDecibels = -10;
+			  analyser.smoothingTimeConstant = 0.85;
+			  const source = audioCtx.createMediaStreamSource(ms)
+			  source.connect(analyser)
+
+			  if (onConnect) {
+				onConnect(pc, ms, analyser, key.id, key.id, key.name)
+				pcS[stream.streamKey].analyser = analyser;
+			  }
+		  }
+		}		
+
+		pcS[stream.streamKey].pc.addTransceiver('audio', { direction: 'recvonly' })					
+		const offer = await pcS[stream.streamKey].pc.createOffer();
+		await pcS[stream.streamKey].pc.setLocalDescription(offer)
+		
+		const whepUrl = "https://pade.chat:5443/orinayo/api/whep"
+		const resp = await fetch(whepUrl, {method: 'POST', body: offer.sdp, headers: {Authorization: `Bearer ${stream.streamKey}`, 'Content-Type': 'application/sdp'}});
+		const answer = await resp.text();
+		await pcS[stream.streamKey].pc.setRemoteDescription({sdp: answer,  type: 'answer'});				
+	}		
+	  
+    setTimeout(() => {subscribe()}, 5000);
 }
 
 export async function start () {
   if (!running) {
     return
   }
-  try {
-    const servers:any = await rpc('turn', [uid])
-    configuration.iceServers = servers.data
-  } catch (err) {
-    console.log('failed to get server', err)
-    configuration.iceServers = [ defaultIceServer ]
-  }
+
   try {
     document.querySelectorAll('.peer').forEach((el:any) => el.remove())
-
-    pc = new RTCPeerConnection(configuration)
-    pc.createDataChannel('chat') // FIXME remove this line
-
-    // chatChannel.onopen = (event) => {
-    //   chatChannel.send('Hi you!')
-    // }
-
-    // chatChannel.onmessage = (event) => {
-    //   chatChannel.send(event.data)
-    // }
-
-    pc.onicecandidate = ({ candidate }) => {
-      rpc('trickle', [rnameRPC, unameRPC, ucid, JSON.stringify(candidate)])
-    }
-
-    pc.ontrack = (event) => {
-      console.log('ontrack', event)
-
-      const stream = event.streams[0]
-      const sid = decodeURIComponent(stream.id)
-      const id = sid.split(':')[0]
-      // console.log('sid', sid)
-      let name = sid.split(':')[1]
-      try {
-        name = Base64.decode(name)
-      } catch (err) {
-        console.log('failed to decode name', name, err)
-      }
-      // console.log(stream, id, name)
-
-      if (id === uid) {
-        return
-      }
-
-      event.track.onmute = (event) => {
-        if (onDisconnect) {
-          const trackId:string = (event as any).target.id as string
-          console.log('onmute', trackId, event)
-          onDisconnect(trackId)
-        }
-      }
-
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.minDecibels = -80;
-      analyser.maxDecibels = -10;
-      analyser.smoothingTimeConstant = 0.85;
-      const source = audioCtx.createMediaStreamSource(stream)
-      source.connect(analyser)
-
-      if (onConnect) {
-        const trackId:string = (event as any).track.id as string
-        onConnect(pc, stream, analyser, trackId, id, name)
-      }
-    }
-
-    let stream
+    pcP = new RTCPeerConnection();	
+    let stream;
+	
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints)
     } catch (err) {
@@ -209,23 +171,26 @@ export async function start () {
     gainNode.connect(audioCtx.destination)
 
     if (onConnect) {
-      onConnect(pc, stream, analyser, 'me', uid, nickname)
+      onConnect(pcP, stream, analyser, "me", uid, nickname)
     }
 
     audioCtx.resume()
 
-    stream.getTracks().forEach((track) => {
-      pc.addTrack(track, stream)
+    stream.getTracks().forEach((track) => {  
+		if (track.kind === 'audio') {
+		  pcP.addTransceiver(track, {direction: 'sendonly'})
+		}	  
     })
-    await pc.setLocalDescription(await pc.createOffer())
 
-    const res = await rpc('publish', [rnameRPC, unameRPC, JSON.stringify(pc.localDescription)])
-    console.log(res)
-    if (res.data && res.data.sdp.type === 'answer') {
-      await pc.setRemoteDescription(res.data.sdp)
-      ucid = res.data.track
-      subscribe(pc)
-    }
+	const offer = await pcP.createOffer();
+	pcP.setLocalDescription(offer)
+	
+	const whipUrl = "https://pade.chat:5443/orinayo/api/whip"
+	const resp = await fetch(whipUrl, {method: 'POST', body: offer.sdp, headers: {Authorization: `Bearer ${streamKey}`, 'Content-Type': 'application/sdp'}});
+	const answer = await resp.text();
+	pcP.setRemoteDescription({sdp: answer,  type: 'answer'});
+    subscribe()	
+
   } catch (err) {
     if (onError) {
       onError(err)
