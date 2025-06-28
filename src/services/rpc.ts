@@ -13,7 +13,10 @@ const constraints = {
 const _AudioContext:any = (window as any).AudioContext || (window as any).webkitAudioContext
 const audioCtx = new _AudioContext()
 const pcS = {}
+const baseUrl = "https://pade.chat:5443/orinayo/api";
+const timeout = 3000;	
 
+let ui = {chat: {mutes: {}}};
 let uid = ''
 let nickname = ''
 let room = ''
@@ -27,7 +30,8 @@ let onResume = (err:any) => {}
 let pcP:any = null
 let running:boolean = false
 
-export function launch (_room, _nickname, _uid, _onConnect, _onDisconnect, _onResume, _onError) {
+export function launch (_ui, _room, _nickname, _uid, _onConnect, _onDisconnect, _onResume, _onError) {
+  ui = _ui	
   room = _room;
   streamKey = btoa(JSON.stringify({room, id: _uid, name: _nickname}));  
   
@@ -38,7 +42,7 @@ export function launch (_room, _nickname, _uid, _onConnect, _onDisconnect, _onRe
   
   nickname = _nickname
   uid = _uid
- 
+ ;
   window.addEventListener("beforeunload", () => { stop()});
   window.addEventListener("unload", () => { stop()});
   
@@ -72,7 +76,7 @@ function detectSilence(analyser) {
 }
 
 async function subscribe () {	
-    const statusURL = "https://pade.chat:5443/orinayo/api/status";	  	  
+    const statusURL = baseUrl + "/status";	  	  
 	const resp = await fetch(statusURL);
 	const streams = await resp.json();
 
@@ -84,7 +88,7 @@ async function subscribe () {
 		if (streamKey == stream.streamKey) continue;		
 		
 		const activeStream = pcS[stream.streamKey];
-		const stale = activeStream && detectSilence(activeStream.analyser);
+		const stale = activeStream && detectSilence(activeStream.analyser) && !ui.chat.mutes.hasOwnProperty(key.id);
 		
 		if (stale) 	{
 		  console.debug('stale check', stale)						
@@ -101,30 +105,22 @@ async function subscribe () {
 		pcS[stream.streamKey].pc.ontrack = (event) => {
 		  const key = pcS[stream.streamKey].key;
 		  const pc = pcS[stream.streamKey].pc;
-		  
+
 		  console.debug('ontrack', event, key, pc);
+		  
+		  const ms = event.streams[0]
+		  const analyser = audioCtx.createAnalyser();
+		  analyser.fftSize = 256;
+		  analyser.minDecibels = -80;
+		  analyser.maxDecibels = -10;
+		  analyser.smoothingTimeConstant = 0.85;
+		  const source = audioCtx.createMediaStreamSource(ms)
+		  source.connect(analyser)
 
-		  for (let ms of event.streams) {
-			  if (!ms) continue;
-			  
-			  const analyser = audioCtx.createAnalyser();
-			  analyser.fftSize = 256;
-			  analyser.minDecibels = -80;
-			  analyser.maxDecibels = -10;
-			  analyser.smoothingTimeConstant = 0.85;
-			  const source = audioCtx.createMediaStreamSource(ms)
-			  source.connect(analyser)
-
-			  if (onConnect) {
-				onConnect(pc, ms, analyser, key.id, key.id, key.name)
-				pcS[stream.streamKey].analyser = analyser;
-				
-				ms.getTracks().forEach((track) => {  
-					if (track.kind === 'audio') {
-						pcS[stream.streamKey].track = track;	
-					}	  
-				})							
-			  }
+		  pcS[stream.streamKey].analyser = analyser;		
+		  
+		  if (onConnect) {
+			onConnect(pc, ms, analyser, key.id, key.id, key.name);
 		  }
 		}		
 
@@ -132,13 +128,13 @@ async function subscribe () {
 		const offer = await pcS[stream.streamKey].pc.createOffer();
 		await pcS[stream.streamKey].pc.setLocalDescription(offer)
 		
-		const whepUrl = "https://pade.chat:5443/orinayo/api/whep"
+		const whepUrl = baseUrl + "/whep"
 		const resp = await fetch(whepUrl, {method: 'POST', body: offer.sdp, headers: {Authorization: `Bearer ${stream.streamKey}`, 'Content-Type': 'application/sdp'}});
 		const answer = await resp.text();
 		await pcS[stream.streamKey].pc.setRemoteDescription({sdp: answer,  type: 'answer'});				
 	}		
 	  
-    setTimeout(() => {subscribe()}, 5000);
+    setTimeout(() => {subscribe()}, timeout);
 }
 
 export async function start () {
@@ -176,10 +172,7 @@ export async function start () {
     analyser.connect(gainNode)
     gainNode.connect(audioCtx.destination)
 
-    if (onConnect) {
-      onConnect(pcP, stream, analyser, "me", uid, nickname)
-    }
-
+    if (onConnect) onConnect(pcP, stream, analyser, "me", uid, nickname)
     audioCtx.resume()
 
     stream.getTracks().forEach((track) => {  
@@ -191,7 +184,7 @@ export async function start () {
 	const offer = await pcP.createOffer();
 	pcP.setLocalDescription(offer)
 	
-	const whipUrl = "https://pade.chat:5443/orinayo/api/whip"
+	const whipUrl =  baseUrl + "/whip"
 	const resp = await fetch(whipUrl, {method: 'POST', body: offer.sdp, headers: {Authorization: `Bearer ${streamKey}`, 'Content-Type': 'application/sdp'}});
 	const answer = await resp.text();
 	pcP.setRemoteDescription({sdp: answer,  type: 'answer'});

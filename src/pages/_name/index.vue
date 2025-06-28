@@ -226,7 +226,7 @@ class RoomPage extends Mixins(PageView) {
     setTimeout(() => {
       this.reload()
       if (this.nickname) {
-        launch(this.roomName, this.nickname, this.uid, this.onConnect, this.onDisconnect, this.onResume, this.onError)
+        launch(this, this.roomName, this.nickname, this.uid, this.onConnect, this.onDisconnect, this.onResume, this.onError)
       }
     }, 100)
   }
@@ -260,7 +260,7 @@ class RoomPage extends Mixins(PageView) {
       window.location.reload()
       return
     }
-    launch(this.roomName, this.nickname, this.uid, this.onConnect, this.onDisconnect, this.onResume, this.onError)
+    launch(this, this.roomName, this.nickname, this.uid, this.onConnect, this.onDisconnect, this.onResume, this.onError)
   }
 
   onConnect (pc:any, stream:any, analyser:any, trackId:string, targetUid:string, targetNickname:string) {
